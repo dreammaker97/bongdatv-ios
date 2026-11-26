@@ -150,4 +150,21 @@ final class BongDaTVTests: XCTestCase {
         let decodedEmpty = try JSONDecoder().decode(MatchesResponse.self, from: Data(emptyMatchesJSON.utf8))
         XCTAssertEqual(decodedEmpty.items.count, 0)
     }
+
+    func testATSConfigurationAllowsPublicHTTP() {
+        let ats = Bundle.main.object(forInfoDictionaryKey: "NSAppTransportSecurity") as? [String: Any]
+        XCTAssertNotNil(ats, "NSAppTransportSecurity must be configured")
+        XCTAssertEqual(ats?["NSAllowsArbitraryLoads"] as? Bool, true)
+        XCTAssertNil(ats?["NSAllowsLocalNetworking"], "NSAllowsLocalNetworking overrides NSAllowsArbitraryLoads on iOS 10+ and breaks public HTTP URLs")
+    }
+
+    func testAPIClientPrioritizesLastWorkingBaseURL() {
+        let lan = "http://192.168.1.210:8080/bongda"
+        let remote = "http://example-remote.invalid:8080/bongda"
+        let baseList = [lan, remote]
+
+        XCTAssertEqual(BongDaAPIClient.prioritizedBaseURLs(baseList, preferred: nil), [lan, remote])
+        XCTAssertEqual(BongDaAPIClient.prioritizedBaseURLs(baseList, preferred: remote), [remote, lan])
+        XCTAssertEqual(BongDaAPIClient.prioritizedBaseURLs(baseList, preferred: "http://other.invalid"), [lan, remote])
+    }
 }

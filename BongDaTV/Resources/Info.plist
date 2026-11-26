@@ -56,8 +56,6 @@
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
-		<key>NSAllowsLocalNetworking</key>
-		<true/>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Tivi Bóng Đá cần truy cập mạng Wi-Fi nội bộ (LAN) để kết nối máy chủ lấy danh sách trận đấu và lịch thi đấu.</string>

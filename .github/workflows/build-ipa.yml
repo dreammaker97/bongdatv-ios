@@ -109,7 +109,9 @@ jobs:
           }
           assert required_orientations.issubset(orientations), f"Missing orientations: {orientations}"
           assert "audio" in plist.get("UIBackgroundModes", []), "Missing background audio mode for PiP"
-          assert plist.get("NSAppTransportSecurity", {}).get("NSAllowsArbitraryLoads") is True, "Missing NSAllowsArbitraryLoads"
+          ats = plist.get("NSAppTransportSecurity", {})
+          assert ats.get("NSAllowsArbitraryLoads") is True, "Missing NSAllowsArbitraryLoads"
+          assert "NSAllowsLocalNetworking" not in ats, "NSAllowsLocalNetworking disables NSAllowsArbitraryLoads on iOS 10+"
           assert bool(plist.get("NSLocalNetworkUsageDescription")), "Missing NSLocalNetworkUsageDescription"
           print("Info.plist verified OK:", plist.get("CFBundleDisplayName"), plist.get("CFBundleIdentifier"))
           EOF

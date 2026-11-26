@@ -24,6 +24,9 @@ enum APIError: LocalizedError {
 }
 
 final class BongDaAPIClient {
+    private static let stateLock = NSLock()
+    private static var lastWorkingBaseURL: String?
+
     private let session: URLSession
 
     init() {
@@ -32,6 +35,31 @@ final class BongDaAPIClient {
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 30
         self.session = URLSession(configuration: config)
+    }
+
+    static func prioritizedBaseURLs(_ baseURLs: [String], preferred: String?) -> [String] {
+        guard let preferred = preferred,
+              !preferred.isEmpty,
+              let idx = baseURLs.firstIndex(of: preferred),
+              idx > 0 else {
+            return baseURLs
+        }
+        var reordered = baseURLs
+        let item = reordered.remove(at: idx)
+        reordered.insert(item, at: 0)
+        return reordered
+    }
+
+    private static func currentPreferredBaseURL() -> String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return lastWorkingBaseURL
+    }
+
+    private static func recordWorkingBaseURL(_ url: String) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        lastWorkingBaseURL = url
     }
 
     func fetchMatches(baseURLs: [String], forceUpdate: Bool = false) async throws -> (groups: [MatchGroup], timeUpdate: String, usedBaseURL: String) {
@@ -75,7 +103,8 @@ final class BongDaAPIClient {
         guard !normalized.isEmpty else {
             throw APIError.noServerConfigured
         }
-        let (data, _) = try await fetchSingle(baseURL: normalized, relativePath: "api.php?tab=matches&server=xoilactv", timeout: 5)
+        let (data, used) = try await fetchSingle(baseURL: normalized, relativePath: "api.php?tab=matches&server=xoilactv", timeout: 5)
+        Self.recordWorkingBaseURL(used)
         let decoded = try JSONDecoder().decode(MatchesResponse.self, from: data)
         return "Kết nối OK • \(decoded.items.count) luồng trận (cập nhật: \(decoded.timeUpdate))"
     }
@@ -103,12 +132,15 @@ final class BongDaAPIClient {
         guard !baseURLs.isEmpty else {
             throw APIError.noServerConfigured
         }
+        let ordered = Self.prioritizedBaseURLs(baseURLs, preferred: Self.currentPreferredBaseURL())
         var lastError: Error = APIError.noServerConfigured
-        for (index, base) in baseURLs.enumerated() {
-            let hasFallback = index < baseURLs.count - 1
-            let timeout = timeoutOverride ?? (hasFallback ? 4.0 : 14.0)
+        for (index, base) in ordered.enumerated() {
+            let hasFallback = index < ordered.count - 1
+            let timeout = timeoutOverride ?? (hasFallback ? 2.0 : 14.0)
             do {
-                return try await fetchSingle(baseURL: base, relativePath: relativePath, timeout: timeout)
+                let result = try await fetchSingle(baseURL: base, relativePath: relativePath, timeout: timeout)
+                Self.recordWorkingBaseURL(result.1)
+                return result
             } catch {
                 lastError = error
             }
