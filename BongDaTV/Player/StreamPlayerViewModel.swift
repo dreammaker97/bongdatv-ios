@@ -195,13 +195,27 @@ final class StreamPlayerViewModel: ObservableObject {
         var serverProxyCandidate: PlaybackCandidate?
         if let rawProxy = entry.urlHls ?? entry.url,
            let resolved = BongDaAPIClient.resolveServerURL(rawProxy, relativeToBase: serverBaseURL) {
-            serverProxyCandidate = PlaybackCandidate(
-                url: resolved,
-                headers: nil,
-                label: "Proxy Server (Dự phòng)",
-                isUsingServerProxy: true,
-                commentator: commentator
-            )
+            let host = resolved.host?.lowercased() ?? ""
+            let isLoopback = (host == "127.0.0.1" || host == "localhost")
+            if resolved.scheme?.lowercased() == "http",
+               !isLoopback,
+               let wrapped = try? await LocalHLSProxy.shared.buildProxiedStreamURL(rawHLS: resolved.absoluteString, referer: referer) {
+                serverProxyCandidate = PlaybackCandidate(
+                    url: wrapped,
+                    headers: nil,
+                    label: "Proxy Server (Dự phòng)",
+                    isUsingServerProxy: true,
+                    commentator: commentator
+                )
+            } else {
+                serverProxyCandidate = PlaybackCandidate(
+                    url: resolved,
+                    headers: nil,
+                    label: "Proxy Server (Dự phòng)",
+                    isUsingServerProxy: true,
+                    commentator: commentator
+                )
+            }
         }
 
         switch activeMode {

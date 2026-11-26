@@ -340,12 +340,19 @@ final class LocalHLSProxy: @unchecked Sendable {
         upstreamReq.httpMethod = method
         upstreamReq.setValue(M3U8Rewriter.mobileUserAgent, forHTTPHeaderField: "User-Agent")
         upstreamReq.setValue(referer, forHTTPHeaderField: "Referer")
+        var fallbackHeaders: [String: String] = [
+            "User-Agent": M3U8Rewriter.mobileUserAgent,
+            "Referer": referer
+        ]
         if let refURL = URL(string: referer), let refScheme = refURL.scheme, let refHost = refURL.host {
             let portSuffix = refURL.port.map { ":\($0)" } ?? ""
-            upstreamReq.setValue("\(refScheme)://\(refHost)\(portSuffix)", forHTTPHeaderField: "Origin")
+            let origin = "\(refScheme)://\(refHost)\(portSuffix)"
+            upstreamReq.setValue(origin, forHTTPHeaderField: "Origin")
+            fallbackHeaders["Origin"] = origin
         }
         if let range = requestHeaders["range"] {
             upstreamReq.setValue(range, forHTTPHeaderField: "Range")
+            fallbackHeaders["Range"] = range
         }
 
         let task = upstreamSession.dataTask(with: upstreamReq) { [weak self] data, response, error in
@@ -355,6 +362,35 @@ final class LocalHLSProxy: @unchecked Sendable {
             }
 
             if let error = error {
+                if RawHTTPClient.isATSError(error), targetURL.scheme?.lowercased() == "http" {
+                    Task {
+                        do {
+                            let rawResp = try await RawHTTPClient.request(
+                                url: targetURL,
+                                method: method,
+                                headers: fallbackHeaders,
+                                timeout: 12
+                            )
+                            self.dispatchUpstreamResponse(
+                                statusCode: rawResp.statusCode,
+                                effectiveURL: rawResp.finalURL,
+                                upstreamHeaders: rawResp.headers,
+                                payload: rawResp.body,
+                                method: method,
+                                typeParam: typeParam,
+                                referer: referer,
+                                connection: connection
+                            )
+                        } catch {
+                            self.sendTextResponse(
+                                connection: connection,
+                                status: "502 Bad Gateway",
+                                body: "Upstream TCP fallback error: \(error.localizedDescription)"
+                            )
+                        }
+                    }
+                    return
+                }
                 self.sendTextResponse(connection: connection, status: "502 Bad Gateway", body: "Upstream error: \(error.localizedDescription)")
                 return
             }
@@ -364,81 +400,106 @@ final class LocalHLSProxy: @unchecked Sendable {
                 return
             }
 
-            let statusCode = httpResp.statusCode
-            let payload = data ?? Data()
-            let effectiveURL = httpResp.url ?? targetURL
-            let upstreamCT = (httpResp.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
-            let looksLikeM3U8 = (typeParam == "m3u8")
-                || upstreamCT.contains("mpegurl")
-                || (payload.count < 512_000 && (String(data: payload.prefix(64), encoding: .utf8)?.contains("#EXTM3U") == true))
-
-            if statusCode >= 400 {
-                let errText = String(data: payload, encoding: .utf8) ?? "HTTP \(statusCode)"
-                self.sendTextResponse(connection: connection, status: "\(statusCode) Upstream Error", body: errText)
-                return
+            var loweredHeaders: [String: String] = [:]
+            for (k, v) in httpResp.allHeaderFields {
+                loweredHeaders[String(describing: k).lowercased()] = String(describing: v)
             }
 
-            if looksLikeM3U8,
-               let textBody = String(data: payload, encoding: .utf8),
-               textBody.contains("#EXTM3U"),
-               let proxyBase = self.currentBaseURL {
-                let rewritten = M3U8Rewriter.rewritePlaylist(
-                    textBody,
-                    effectiveURL: effectiveURL,
-                    referer: referer,
-                    proxyBaseURL: proxyBase
-                )
-                let outData = Data(rewritten.utf8)
-                self.sendBinaryResponse(
-                    connection: connection,
-                    statusLine: "200 OK",
-                    contentType: "application/vnd.apple.mpegurl",
-                    body: method == "HEAD" ? Data() : outData,
-                    reportedLength: outData.count,
-                    extraHeaders: [
-                        "Cache-Control": "no-store, no-cache, must-revalidate",
-                        "Access-Control-Allow-Origin": "*"
-                    ]
-                )
-                return
-            }
-
-            let statusLine = statusCode == 206 ? "206 Partial Content" : "200 OK"
-            let mediaCT: String
-            if !upstreamCT.isEmpty && !upstreamCT.contains("text/plain") {
-                mediaCT = httpResp.value(forHTTPHeaderField: "Content-Type") ?? "video/mp2t"
-            } else {
-                mediaCT = "video/mp2t"
-            }
-
-            var extraHeaders: [String: String] = [
-                "Accept-Ranges": "bytes",
-                "Cache-Control": "public, max-age=3600",
-                "Access-Control-Allow-Origin": "*"
-            ]
-            if let contentRange = httpResp.value(forHTTPHeaderField: "Content-Range") {
-                extraHeaders["Content-Range"] = contentRange
-            }
-
-            let expectedLength: Int
-            if method == "HEAD",
-               let clStr = httpResp.value(forHTTPHeaderField: "Content-Length"),
-               let clInt = Int(clStr) {
-                expectedLength = clInt
-            } else {
-                expectedLength = payload.count
-            }
-
-            self.sendBinaryResponse(
-                connection: connection,
-                statusLine: statusLine,
-                contentType: mediaCT,
-                body: method == "HEAD" ? Data() : payload,
-                reportedLength: expectedLength,
-                extraHeaders: extraHeaders
+            self.dispatchUpstreamResponse(
+                statusCode: httpResp.statusCode,
+                effectiveURL: httpResp.url ?? targetURL,
+                upstreamHeaders: loweredHeaders,
+                payload: data ?? Data(),
+                method: method,
+                typeParam: typeParam,
+                referer: referer,
+                connection: connection
             )
         }
         task.resume()
+    }
+
+    private func dispatchUpstreamResponse(
+        statusCode: Int,
+        effectiveURL: URL,
+        upstreamHeaders: [String: String],
+        payload: Data,
+        method: String,
+        typeParam: String,
+        referer: String,
+        connection: NWConnection
+    ) {
+        let upstreamCTRaw = upstreamHeaders["content-type"] ?? ""
+        let upstreamCT = upstreamCTRaw.lowercased()
+        let looksLikeM3U8 = (typeParam == "m3u8")
+            || upstreamCT.contains("mpegurl")
+            || (payload.count < 512_000 && (String(data: payload.prefix(64), encoding: .utf8)?.contains("#EXTM3U") == true))
+
+        if statusCode >= 400 {
+            let errText = String(data: payload, encoding: .utf8) ?? "HTTP \(statusCode)"
+            sendTextResponse(connection: connection, status: "\(statusCode) Upstream Error", body: errText)
+            return
+        }
+
+        if looksLikeM3U8,
+           let textBody = String(data: payload, encoding: .utf8),
+           textBody.contains("#EXTM3U"),
+           let proxyBase = currentBaseURL {
+            let rewritten = M3U8Rewriter.rewritePlaylist(
+                textBody,
+                effectiveURL: effectiveURL,
+                referer: referer,
+                proxyBaseURL: proxyBase
+            )
+            let outData = Data(rewritten.utf8)
+            sendBinaryResponse(
+                connection: connection,
+                statusLine: "200 OK",
+                contentType: "application/vnd.apple.mpegurl",
+                body: method == "HEAD" ? Data() : outData,
+                reportedLength: outData.count,
+                extraHeaders: [
+                    "Cache-Control": "no-store, no-cache, must-revalidate",
+                    "Access-Control-Allow-Origin": "*"
+                ]
+            )
+            return
+        }
+
+        let statusLine = statusCode == 206 ? "206 Partial Content" : "200 OK"
+        let mediaCT: String
+        if !upstreamCT.isEmpty && !upstreamCT.contains("text/plain") {
+            mediaCT = upstreamCTRaw
+        } else {
+            mediaCT = "video/mp2t"
+        }
+
+        var extraHeaders: [String: String] = [
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "public, max-age=3600",
+            "Access-Control-Allow-Origin": "*"
+        ]
+        if let contentRange = upstreamHeaders["content-range"] {
+            extraHeaders["Content-Range"] = contentRange
+        }
+
+        let expectedLength: Int
+        if method == "HEAD",
+           let clStr = upstreamHeaders["content-length"],
+           let clInt = Int(clStr) {
+            expectedLength = clInt
+        } else {
+            expectedLength = payload.count
+        }
+
+        sendBinaryResponse(
+            connection: connection,
+            statusLine: statusLine,
+            contentType: mediaCT,
+            body: method == "HEAD" ? Data() : payload,
+            reportedLength: expectedLength,
+            extraHeaders: extraHeaders
+        )
     }
 
     private func sendTextResponse(connection: NWConnection, status: String, body: String) {

@@ -167,4 +167,34 @@ final class BongDaTVTests: XCTestCase {
         XCTAssertEqual(BongDaAPIClient.prioritizedBaseURLs(baseList, preferred: remote), [remote, lan])
         XCTAssertEqual(BongDaAPIClient.prioritizedBaseURLs(baseList, preferred: "http://other.invalid"), [lan, remote])
     }
+
+    func testRawHTTPClientChunkedAndResponseParsing() throws {
+        let chunkedPayload = Data("5;ext=1\r\nHello\r\n7\r\n, World\r\n0\r\n\r\n".utf8)
+        let decoded = RawHTTPClient.decodeChunked(chunkedPayload)
+        XCTAssertEqual(String(data: decoded, encoding: .utf8), "Hello, World")
+
+        let rawChunkedHTTP = Data(
+            ("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n" +
+             "5\r\n{\"ok\"\r\n6\r\n:true}\r\n0\r\n\r\n").utf8
+        )
+        let respChunked = try RawHTTPClient.parseHTTPResponse(rawChunkedHTTP, requestURL: URL(string: "http://127.0.0.1:8080/test")!)
+        XCTAssertEqual(respChunked.statusCode, 200)
+        XCTAssertEqual(String(data: respChunked.body, encoding: .utf8), "{\"ok\":true}")
+
+        let rawFixedHTTP = Data("HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found".utf8)
+        let respFixed = try RawHTTPClient.parseHTTPResponse(rawFixedHTTP, requestURL: URL(string: "http://127.0.0.1:8080/miss")!)
+        XCTAssertEqual(respFixed.statusCode, 404)
+        XCTAssertEqual(String(data: respFixed.body, encoding: .utf8), "Not Found")
+    }
+
+    func testRawHTTPClientLiveLoopbackPing() async throws {
+        let proxy = LocalHLSProxy()
+        defer { proxy.stop() }
+
+        let baseURL = try await proxy.ensureRunning()
+        let pingURL = baseURL.appendingPathComponent("ping")
+        let response = try await RawHTTPClient.request(url: pingURL, method: "GET", timeout: 5)
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual(String(data: response.body, encoding: .utf8), "pong")
+    }
 }

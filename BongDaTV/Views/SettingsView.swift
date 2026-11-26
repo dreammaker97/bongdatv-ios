@@ -104,6 +104,16 @@ struct SettingsView: View {
                         cronMessage = ""
                     }
                 }
+
+                Section(header: Text("Thông tin ứng dụng")) {
+                    HStack {
+                        Text("Phiên bản")
+                        Spacer()
+                        Text(appVersionDisplay)
+                            .font(.caption.monospaced())
+                            .foregroundColor(.secondary)
+                    }
+                }
             }
             .navigationTitle("Cài đặt")
         }
@@ -146,5 +156,11 @@ struct SettingsView: View {
             cronMessage = "❌ \(error.localizedDescription)"
         }
         isUpdatingCron = false
+    }
+
+    private var appVersionDisplay: String {
+        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.1"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "2"
+        return "\(short) (Build \(build))"
     }
 }

@@ -157,10 +157,21 @@ final class BongDaAPIClient {
         var req = URLRequest(url: url)
         req.timeoutInterval = timeout
         req.cachePolicy = .reloadIgnoringLocalCacheData
-        let (data, response) = try await session.data(for: req)
-        if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
-            throw APIError.httpError(http.statusCode)
+        do {
+            let (data, response) = try await session.data(for: req)
+            if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+                throw APIError.httpError(http.statusCode)
+            }
+            return (data, normalizedBase)
+        } catch {
+            if RawHTTPClient.isATSError(error), url.scheme?.lowercased() == "http" {
+                let rawResp = try await RawHTTPClient.request(url: url, method: "GET", timeout: timeout)
+                if rawResp.statusCode >= 400 {
+                    throw APIError.httpError(rawResp.statusCode)
+                }
+                return (rawResp.body, normalizedBase)
+            }
+            throw error
         }
-        return (data, normalizedBase)
     }
 }
