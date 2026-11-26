@@ -43,7 +43,7 @@ enum PlaybackMode: String, CaseIterable, Identifiable, Codable {
 
 @MainActor
 final class AppSettings: ObservableObject {
-    static let defaultLANServerURL = "http://192.168.1.210:8080/bongda"
+    nonisolated static let defaultLANServerURL = "http://192.168.1.210:8080/bongda"
 
     private enum Keys {
         static let serverURL = "bongdatv.serverURL"
@@ -106,7 +106,7 @@ final class AppSettings: ObservableObject {
         return list
     }
 
-    static func normalizeBaseURL(_ raw: String) -> String {
+    nonisolated static func normalizeBaseURL(_ raw: String) -> String {
         var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         while trimmed.hasSuffix("/") {
             trimmed.removeLast()
