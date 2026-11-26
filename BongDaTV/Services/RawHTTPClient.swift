@@ -275,6 +275,7 @@ private final class TCPRequestRunner: @unchecked Sendable {
     private var headerEndOffset = 0
     private var expectedContentLength: Int?
     private var isChunked = false
+    private var selfRetain: TCPRequestRunner?
 
     init(
         host: String,
@@ -293,30 +294,35 @@ private final class TCPRequestRunner: @unchecked Sendable {
     }
 
     func start() {
-        let work = DispatchWorkItem { [weak self] in
-            self?.finish(with: .failure(RawHTTPClientError.timedOut))
-        }
-        self.timeoutWorkItem = work
-        queue.asyncAfter(deadline: .now() + timeout, execute: work)
+        queue.async {
+            guard !self.finished else { return }
+            self.selfRetain = self
 
-        connection.stateUpdateHandler = { [weak self] state in
-            guard let self = self, !self.finished else { return }
-            switch state {
-            case .ready:
-                self.sendRequest()
-            case .failed(let error):
-                self.finish(with: .failure(error))
-            case .cancelled:
-                if !self.buffer.isEmpty && self.headerParsed {
-                    self.finish(with: .success(self.buffer))
-                } else {
-                    self.finish(with: .failure(RawHTTPClientError.emptyResponse))
-                }
-            default:
-                break
+            let work = DispatchWorkItem { [weak self] in
+                self?.finish(with: .failure(RawHTTPClientError.timedOut))
             }
+            self.timeoutWorkItem = work
+            self.queue.asyncAfter(deadline: .now() + self.timeout, execute: work)
+
+            self.connection.stateUpdateHandler = { [weak self] state in
+                guard let self = self, !self.finished else { return }
+                switch state {
+                case .ready:
+                    self.sendRequest()
+                case .failed(let error):
+                    self.finish(with: .failure(error))
+                case .cancelled:
+                    if !self.buffer.isEmpty && self.headerParsed {
+                        self.finish(with: .success(self.buffer))
+                    } else {
+                        self.finish(with: .failure(RawHTTPClientError.emptyResponse))
+                    }
+                default:
+                    break
+                }
+            }
+            self.connection.start(queue: self.queue)
         }
-        connection.start(queue: queue)
     }
 
     private func sendRequest() {
@@ -406,6 +412,7 @@ private final class TCPRequestRunner: @unchecked Sendable {
         connection.cancel()
         let cont = continuation
         continuation = nil
+        selfRetain = nil
         cont?.resume(with: result)
     }
 }
